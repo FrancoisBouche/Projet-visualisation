@@ -1,0 +1,537 @@
+---
+title: "Salary analysis OVER TIME"
+format: pdf
+editor: visual
+---
+
+work_year: The year the salary was paid.
+experience_level: The experience level in the job during the year with the following possible values: EN Entry-level / Junior MI Mid-level / Intermediate SE Senior-level / Expert EX Executive-level / Director
+employment_type:The type of employement for the role: PT Part-time FT Full-time CT Contract FL Freelance
+salary: The total gross salary amount paid.
+salary_currency: The currency of the salary paid as an ISO 4217 currency code.
+salaryinusd:The salary in USD (FX rate divided by avg. USD rate for the respective year via fxdata.foorilla.com).
+employee_residence: Employee's primary country of residence in during the work year as an ISO 3166 country code.
+remote_ratio: The overall amount of work done remotely, possible values are as follows: 0 No remote work (less than 20%) 50 Partially remote 100 Fully remote (more than 80%)
+company_location: The country of the employer's main office or contracting branch as an ISO 3166 country code.
+company_size: The average number of people that worked for the company during the year: S less than 50 employees (small) M 50 to 250 employees (medium) L more than 250 employees (large)
+```{r}
+salaries <- read.csv("salaries.csv", sep=",", stringsAsFactors = T)
+str(salaries)
+salaries$work_year <- as.factor(salaries$work_year)
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(tidyr)
+library(highcharter)
+library(maps) # Pour les coordonnées des pays
+library(countries)
+library(GGally)
+library(FactoMineR)
+library(Factoshiny)
+library(highcharter) #Map
+```
+
+EDA
+
+```{r}
+
+
+# cHECHING 
+ggpairs(salaries[, c("salary_in_usd", "work_year")])
+
+
+# Pairplot with `work_year` as a factor
+ggpairs(salaries[, c("salary_in_usd", "remote_ratio")],
+        mapping = ggplot2::aes(color = salaries$work_year))
+
+
+
+```
+dealing with imbalancy
+```{r}
+# Use proportional bar plots to account for imbalance
+ggplot(salaries, aes(x = work_year, fill = experience_level)) +
+    geom_bar(position = "fill") +
+    theme_minimal() +
+    labs(y = "Proportion", x = "Year", title = "Proportional Representation by Year")
+
+```
+clustering
+```{r}
+
+
+resMCA <- MCA(salaries)
+plot(resMCA,invis="ind",title="MCA graph of the categories")
+```
+
+
+On a envie de regrouper des titres similaires pour approfondir les analyses (bien mettre en exergue ce choix important à l'oral)
+
+```{r}
+
+# Add a new column to categorize job titles
+
+salaries <- salaries %>%
+  mutate(job_category = case_when(
+    grepl("scientist|Machine Learning", job_title, ignore.case = TRUE) ~ "Data Scientist",
+    grepl("analyst", job_title, ignore.case = TRUE) ~ "Data Analyst",
+    grepl("engineer", job_title, ignore.case = TRUE) ~ "Data Engineer", 
+    grepl("architect", job_title, ignore.case = TRUE) ~ "Data Architect", 
+    TRUE ~ "Autres"  # Other categories for job titles that don't match any keyword
+  ))
+
+
+```
+```{r}
+# Calculate average salary per year for each job category
+
+
+# Calculate the average salary per job category
+salary_by_category <- salaries %>%
+  group_by(work_year,job_category) %>% 
+  summarize(median_salary = median(salary_in_usd), .groups = "drop") %>%
+  arrange(desc(median_salary))  # Sort by average salary in descending order
+
+
+
+# Plot salary evolution by job category
+
+ggplot(salary_by_category, aes(x = work_year, y = median_salary, color = job_category, group = job_category)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Evolution du salaire médian annuel par catégorie de poste",
+       x = "Année", y = "Salaire médian annuel (USD)", color = "Catégorie de poste") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+```
+
+```{r}
+# Customize legend labels with bold font for certain categories
+ggplot(salary_by_category, aes(x = work_year, y = mean_salary, color = job_category, group = job_category)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = "Évolution des salaires annuels de 2020 à 2024 par type de profil",
+       x = "Année", y = "Salaire moyen annuel (USD)", color = "Catégorie de poste") +
+  scale_color_viridis_d(option = "D", end = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(face = ifelse(salary_evolution$job_category == "Scientist", "bold", "plain"))) +
+  theme_economist() + scale_fill_economist()
+### XKCD theme
+theme_xkcd <- theme(
+    panel.background = element_rect(fill="white"), 
+    axis.ticks = element_line(colour=NA),
+    panel.grid = element_line(colour="white"),
+    axis.text.y = element_text(colour=NA), 
+    axis.text.x = element_text(colour="black"),
+    text = element_text(size=16, family="Humor Sans")
+    )
+
+
+ggsave("xkcd_ggplot.jpg", plot=p, width=8, height=5)
+
+```
+
+## Test de comparaison des moyennes Anova et post hoc
+
+```{r}
+# Perform ANOVA to test for differences in mean salary by job category
+anova_result <- aov(salary_in_usd ~ job_category, data = salaries)
+summary(anova_result)
+
+# Perform pairwise t-tests with p-value adjustment
+pairwise_tests <- pairwise.t.test(
+  salaries$salary_in_usd, 
+  salaries$job_category, 
+  p.adjust.method = "bonferroni"
+)
+
+# Extract p-values into a data frame
+p_values <- as.data.frame(pairwise_tests$p.value) %>%
+  rownames_to_column("Category_1") %>%
+  pivot_longer(-Category_1, names_to = "Category_2", values_to = "p_value") %>%
+  filter(!is.na(p_value)) %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01  ~ "**",
+      p_value < 0.05  ~ "*",
+      TRUE            ~ "ns"
+    )
+  )
+
+
+
+
+ggplot(salary_evolution, aes(x = work_year, y = mean_salary, color = job_category, group = job_category)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(
+    title = "Salary Evolution Over Years by Job Category with Statistical Significance",
+    x = "Year",
+    y = "Average Salary (USD)",
+    color = "Job Category"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(
+    data = p_values %>% filter(p_value < 0.05), # Add only significant p-values
+    aes(label = significance),
+    vjust = -1.5,
+    size = 4
+  )
+```
+
+```{r}
+
+
+# Identify top 10 countries by mean salary
+top_10_countries <- salaries %>%
+  group_by(company_location) %>%
+  summarize(mean_salary = mean(salary_in_usd, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(mean_salary, n = 4) %>% 
+  pull(company_location) # Extract country names
+
+# Filter data for the top 10 countries
+filtered_data <- salaries %>%
+  filter(company_location %in% top_10_countries)
+
+# Summarize data for plotting
+salary_trend <- filtered_data %>%
+  group_by(work_year, job_category, company_location) %>%
+  summarize(mean_salary = mean(salary_in_usd, na.rm = TRUE), .groups = "drop")
+
+# Create the plot
+ggplot(salary_trend, aes(x = work_year, y = mean_salary, color = job_category, group = job_category)) +
+  geom_line(size = 1) +
+  facet_wrap(~company_location) +
+  labs(
+    title = "Evolution du salaire médian annuel  ",
+    x = "Year",
+    y = "Mean Salary (USD)",
+    color = "Job Category"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+MAPPING
+```{r}
+library(treemap)
+library(highcharter)
+library(countrycode)
+##########
+# Créer un vecteur associant les codes pays aux noms de pays
+pays_abbreviation <- c(
+  "AX" = "Åland Islands", "IT" = "Italy", "US" = "United States", "CA" = "Canada", 
+  "GB" = "United Kingdom", "DE" = "Germany", "EG" = "Egypt", "LT" = "Lithuania", 
+  "NZ" = "New Zealand", "PL" = "Poland", "FR" = "France", "AT" = "Austria", 
+  "CO" = "Colombia", "LB" = "Lebanon", "IN" = "India", "AR" = "Argentina", 
+  "CL" = "Chile", "ZA" = "South Africa", "IE" = "Ireland", "SK" = "Slovakia", 
+  "CH" = "Switzerland", "AU" = "Australia", "BG" = "Bulgaria", "CY" = "Cyprus", 
+  "EC" = "Ecuador", "MX" = "Mexico", "SV" = "El Salvador", "CR" = "Costa Rica", 
+  "BE" = "Belgium", "PE" = "Peru", "ES" = "Spain", "JP" = "Japan", "NL" = "Netherlands", 
+  "HU" = "Hungary", "SG" = "Singapore", "LV" = "Latvia", "PH" = "Philippines", 
+  "PT" = "Portugal", "HR" = "Croatia", "FI" = "Finland", "BR" = "Brazil", "KE" = "Kenya", 
+  "IL" = "Israel", "SE" = "Sweden", "UA" = "Ukraine", "TR" = "Turkey", "PK" = "Pakistan", 
+  "AM" = "Armenia", "HN" = "Honduras", "GR" = "Greece", "MT" = "Malta", "CZ" = "Czech Republic", 
+  "RO" = "Romania", "VE" = "Venezuela", "KR" = "South Korea", "DZ" = "Algeria", "AS" = "American Samoa", 
+  "LU" = "Luxembourg", "RS" = "Serbia", "DK" = "Denmark", "AE" = "United Arab Emirates", 
+  "SA" = "Saudi Arabia", "OM" = "Oman", "BA" = "Bosnia and Herzegovina", "EE" = "Estonia", 
+  "VN" = "Vietnam", "NG" = "Nigeria", "GI" = "Gibraltar", "SI" = "Slovenia", "MU" = "Mauritius", 
+  "RU" = "Russia", "QA" = "Qatar", "GH" = "Ghana", "AD" = "Andorra", "NO" = "Norway", 
+  "HK" = "Hong Kong", "CF" = "Central African Republic", "TH" = "Thailand", "IR" = "Iran", 
+  "BS" = "Bahamas", "PR" = "Puerto Rico", "ID" = "Indonesia", "MY" = "Malaysia", "IQ" = "Iraq", 
+  "CN" = "China", "MD" = "Moldova"
+)
+########
+# Ajouter une nouvelle colonne avec les noms complets des pays
+salaries <- salaries %>%
+  mutate(Pays_Nom_Complet = pays_abbreviation[as.character(company_location)])
+
+
+# Get ISO3 codes for the country names (this will return the ISO3 codes corresponding to the full country names)
+pays_noms1 <- country_name(x = salaries$Pays_Nom_Complet, to = "ISO3")
+
+# Create a data frame with the ISO3 codes
+nom_pays <- data.frame(Pays_Nom_Complet = salaries$Pays_Nom_Complet, ISO3 = pays_noms1)
+
+# Remove duplicates if necessary
+pays_noms2 <- pays_noms2 %>% distinct()
+nom_pays <- nom_pays %>% distinct()
+
+# Now join by 'Pays_Nom_Complet' (assuming both data frames have this column)
+data_coordonnees <- pays_noms2 %>%
+  left_join(nom_pays, by = "Pays_Nom_Complet")
+
+# Verify the result
+head(data_coordonnees)
+
+
+# Faire correspondre vos pays avec les données de coordonnées
+
+pays_noms2 <- pays_noms2 %>% distinct()
+nom_pays <- nom_pays %>% distinct()
+data_coordonnees <- left_join(pays_noms2,nom_pays, by =("Pays_Nom_Complet"))
+
+
+
+# theme personalisé
+hc_theme_custom <- hc_theme(
+  chart = list(
+    backgroundColor = "#F9FAFB", # Couleur de fond clair: Le fond gris clair (#F9FAFB) donne une apparence professionnelle et réduit la fatigue visuelle.
+    style = list(
+      fontFamily = "Roboto, Arial, sans-serif" # Police moderne
+  )),
+  title = list(
+    align = "center",
+    style = list(
+      color = "#333333", # Titre noir
+      fontWeight = "bold",
+      fontSize = "18px"
+    )),
+  subtitle = list(
+    align = "center",
+    style = list(
+      color = "#666666", # Sous-titre gris
+      fontWeight = "normal",
+      fontSize = "14px"
+    )),
+  legend = list(
+    itemStyle = list(
+      color = "#333333",
+      fontSize = "10px"
+    ),
+    itemHoverStyle = list(
+      color = "#1D68A7" # Couleur au survol
+    )),
+  tooltip = list(
+    backgroundColor = "#FFFFCD", # Fond blanc
+    borderColor = "#DDDDDD",
+    style = list(
+      color = "#133343",
+      fontSize = "14px"
+    )),
+  colorAxis = list(
+    gridLineColor = "#E6E6E6" # Ligne de la grille
+    ))
+
+
+# Calcul salaires moyens (on peu penser au niveau de vie par Pays. peut être en parler en conclusion)
+
+data_scientist_salaries <- salaries %>%
+  filter(job_category == "Data Scientist") %>% # Ensure the column name matches your data
+  group_by(company_location,Pays_Nom_Complet) %>%
+  summarize(
+    median_salary = median(salary_in_usd, na.rm = TRUE),
+    remote_ratio = median(remote_ratio, na.rm = TRUE) 
+  )
+
+
+
+data_coordonnees <- left_join(data_scientist_salaries,data_coordonnees, by =("Pays_Nom_Complet"))
+
+
+mapdata <- get_data_from_map(download_map_data("custom/world-robinson-lowres"))
+
+
+hcmap(
+  "custom/world-robinson-lowres",
+  data = data_coordonnees,
+  name = "Salaires moyens par pays",
+  dataLabels = list(
+    enabled = TRUE, format = "{point.name}",
+    style = list(
+      fontSize = "10px",
+      textOutline = "1px contrast"),
+    allowOverlap = FALSE,
+    filter = list(
+      property = "value",      # Basé sur la colonne 'value' (median_salary)
+      operator = ">",          # Condition : la valeur doit être > 0
+      value = 0
+    ),
+  borderColor = "#FAFAFA"),
+  value = "median_salary",
+  borderWidth = 0.2,
+  tooltip = list(
+    valueDecimals = 2,
+    valuePrefix = "$",
+    valueSuffix = " USD"
+  ),
+  nullColor = "#d3d1d1",
+  joinBy = c("iso-a3", "ISO3")
+) |>
+  hc_colorAxis(
+    stops = color_stops(colors = viridisLite::viridis(10, begin = 0.01)), # easier to read by those with colorblindness, and print well in gray scale.
+    type = "linear"
+    ) |> 
+      hc_title(text = "Salaire annuel médian (USD) d'un(e) data Scientist par Pays ") |>
+  hc_subtitle(text = "Données entre 2020 et 2024")|>
+  hc_add_theme(hc_theme_custom)
+  
+
+
+
+```
+## Pour un data Analyst
+
+```{r}
+##########
+# Créer un vecteur associant les codes pays aux noms de pays
+pays_abbreviation <- c(
+  "AX" = "Åland Islands", "IT" = "Italy", "US" = "United States", "CA" = "Canada", 
+  "GB" = "United Kingdom", "DE" = "Germany", "EG" = "Egypt", "LT" = "Lithuania", 
+  "NZ" = "New Zealand", "PL" = "Poland", "FR" = "France", "AT" = "Austria", 
+  "CO" = "Colombia", "LB" = "Lebanon", "IN" = "India", "AR" = "Argentina", 
+  "CL" = "Chile", "ZA" = "South Africa", "IE" = "Ireland", "SK" = "Slovakia", 
+  "CH" = "Switzerland", "AU" = "Australia", "BG" = "Bulgaria", "CY" = "Cyprus", 
+  "EC" = "Ecuador", "MX" = "Mexico", "SV" = "El Salvador", "CR" = "Costa Rica", 
+  "BE" = "Belgium", "PE" = "Peru", "ES" = "Spain", "JP" = "Japan", "NL" = "Netherlands", 
+  "HU" = "Hungary", "SG" = "Singapore", "LV" = "Latvia", "PH" = "Philippines", 
+  "PT" = "Portugal", "HR" = "Croatia", "FI" = "Finland", "BR" = "Brazil", "KE" = "Kenya", 
+  "IL" = "Israel", "SE" = "Sweden", "UA" = "Ukraine", "TR" = "Turkey", "PK" = "Pakistan", 
+  "AM" = "Armenia", "HN" = "Honduras", "GR" = "Greece", "MT" = "Malta", "CZ" = "Czech Republic", 
+  "RO" = "Romania", "VE" = "Venezuela", "KR" = "South Korea", "DZ" = "Algeria", "AS" = "American Samoa", 
+  "LU" = "Luxembourg", "RS" = "Serbia", "DK" = "Denmark", "AE" = "United Arab Emirates", 
+  "SA" = "Saudi Arabia", "OM" = "Oman", "BA" = "Bosnia and Herzegovina", "EE" = "Estonia", 
+  "VN" = "Vietnam", "NG" = "Nigeria", "GI" = "Gibraltar", "SI" = "Slovenia", "MU" = "Mauritius", 
+  "RU" = "Russia", "QA" = "Qatar", "GH" = "Ghana", "AD" = "Andorra", "NO" = "Norway", 
+  "HK" = "Hong Kong", "CF" = "Central African Republic", "TH" = "Thailand", "IR" = "Iran", 
+  "BS" = "Bahamas", "PR" = "Puerto Rico", "ID" = "Indonesia", "MY" = "Malaysia", "IQ" = "Iraq", 
+  "CN" = "China", "MD" = "Moldova"
+)
+########
+# Ajouter une nouvelle colonne avec les noms complets des pays
+salaries <- salaries %>%
+  mutate(Pays_Nom_Complet = pays_abbreviation[as.character(company_location)])
+
+
+# Get ISO3 codes for the country names (this will return the ISO3 codes corresponding to the full country names)
+pays_noms1 <- country_name(x = salaries$Pays_Nom_Complet, to = "ISO3")
+
+# Create a data frame with the ISO3 codes
+nom_pays <- data.frame(Pays_Nom_Complet = salaries$Pays_Nom_Complet, ISO3 = pays_noms1)
+
+# Remove duplicates if necessary
+pays_noms2 <- pays_noms2 %>% distinct()
+nom_pays <- nom_pays %>% distinct()
+
+# Now join by 'Pays_Nom_Complet' (assuming both data frames have this column)
+data_coordonnees <- pays_noms2 %>%
+  left_join(nom_pays, by = "Pays_Nom_Complet")
+
+# Verify the result
+head(data_coordonnees)
+
+
+# Faire correspondre vos pays avec les données de coordonnées
+
+pays_noms2 <- pays_noms2 %>% distinct()
+nom_pays <- nom_pays %>% distinct()
+data_coordonnees <- left_join(pays_noms2,nom_pays, by =("Pays_Nom_Complet"))
+
+
+
+# theme personalisé
+hc_theme_custom <- hc_theme(
+  chart = list(
+    backgroundColor = "#F9FAFB", # Couleur de fond claire
+    style = list(
+      fontFamily = "Roboto, Arial, sans-serif" # Police moderne
+  )),
+  title = list(
+    align = "center",
+    style = list(
+      color = "#333333", # Titre noir
+      fontWeight = "bold",
+      fontSize = "18px"
+    )),
+  subtitle = list(
+    align = "center",
+    style = list(
+      color = "#666666", # Sous-titre gris
+      fontWeight = "normal",
+      fontSize = "14px"
+    )),
+  legend = list(
+    itemStyle = list(
+      color = "#333333",
+      fontSize = "12px"
+    ),
+    itemHoverStyle = list(
+      color = "#1D68A7" # Couleur au survol
+    )),
+  tooltip = list(
+    backgroundColor = "#FFFFFF", # Fond blanc
+    borderColor = "#DDDDDD",
+    style = list(
+      color = "#333333",
+      fontSize = "12px"
+    )),
+  colorAxis = list(
+    gridLineColor = "#E6E6E6" # Ligne de la grille
+    ))
+
+
+# Calcul salaires moyens
+
+data_scientist_salaries <- salaries %>%
+  filter(job_category == "Data Analyst") %>% # Ensure the column name matches your data
+  group_by(company_location,Pays_Nom_Complet) %>%
+  summarize(
+    median_salary = median(salary_in_usd, na.rm = TRUE) 
+  )
+
+
+
+data_coordonnees <- left_join(data_scientist_salaries,data_coordonnees, by =("Pays_Nom_Complet"))
+#data_coordonnees <- data_coordonnees[-1,]
+
+
+mapdata <- get_data_from_map(download_map_data("custom/world-robinson-lowres"))
+
+
+hcmap(
+  "custom/world-robinson-lowres",
+  data = data_coordonnees,
+  name = "Salaires moyens par pays",
+  dataLabels = list(enabled = TRUE, format = "{point.name}"),
+  borderColor = "#FAFAFA",
+  value = "median_salary",
+  borderWidth = 0.1,
+  tooltip = list(
+    valueDecimals = 2,
+    valuePrefix = "$",
+    valueSuffix = " USD"
+  ),
+  nullColor = "#d3d3d3",
+  joinBy = c("iso-a3", "ISO3")
+) |>
+  hc_colorAxis(
+    stops = color_stops(colors = viridisLite::inferno(10, begin = 0.01)),
+    type = "linear") |> 
+      hc_title(text = "Salaire médian d'un data Analyst par Pays") |>
+  hc_subtitle(text = "Données entre 2020 et 2024")|>
+  
+  # Add remote ratio as labels on the map
+  hc_add_series_labels_values(
+    name = "Remote Ratio", 
+    data = data_coordonnees,
+    value = "remote_ratio",  # Show remote ratio values as labels
+    label = list(format = "{point.remote_ratio}%"),  # Format the label as percentage
+    dataLabels = list(
+      enabled = TRUE,
+      style = list(color = "white", fontWeight = "bold", fontSize = "12px")
+    )
+  ) |>
+  hc_add_theme(hc_theme_custom)  # Apply your custom theme
+
+```
+
+
+
